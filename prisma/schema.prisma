@@ -1,0 +1,175 @@
+// Prisma schema for the Smart Expense Insights Platform.
+//
+// Derived directly from design.md §Data Models and §PostgreSQL + Prisma Design.
+// Money is stored as Decimal(12,2) end-to-end to preserve exact two-decimal
+// precision and satisfy the analytics/budget sum invariants (Req 4.1, 6.1, 9.1,
+// 11.5). Per-user data isolation is enforced at the query layer (owner-scoped
+// queries) backed by the foreign keys and indexes declared here.
+
+generator client {
+  provider = "prisma-client-js"
+  // Binary targets (design.md §"Prisma engine bundling for Lambda", Req 16.3,
+  // 16.5; C4, C6):
+  //   - "native"            → the query engine for the local dev machine so
+  //                           `prisma generate` / local runs work as before.
+  //   - "rhel-openssl-3.0.x" → the query engine for the AWS Lambda runtime
+  //                           (Amazon Linux 2023 / nodejs20.x). This produces
+  //                           the `libquery_engine-rhel-openssl-3.0.x.so.node`
+  //                           binary under `node_modules/.prisma/client` which
+  //                           MUST be bundled into the Lambda deployment
+  //                           package (see BUNDLING note below) so the same
+  //                           codebase runs identically on AWS (Req 16.5).
+  //
+  // BUNDLING (SAM / esbuild): the generated Prisma client and its engine binary
+  // are shipped with the function artifact. When packaging with `sam build`
+  // using the esbuild builder, the engine `.so.node` files are native assets
+  // that esbuild does not resolve automatically — they must be kept out of the
+  // bundle and copied alongside it. Achieve this by either:
+  //   (a) marking the Prisma engine as external in the esbuild config and
+  //       including `node_modules/.prisma/client` + `node_modules/@prisma/client`
+  //       in the packaged artifact (SAM `Metadata.BuildProperties.External`), or
+  //   (b) copying `node_modules/.prisma` into the build artifact as a post-build
+  //       step so the `rhel-openssl-3.0.x` engine ships with the function.
+  // The build/deploy order is: `prisma generate` → `npm run build` → `sam build`
+  // → `sam deploy` (see design.md §"Build / package / deploy flow"). Verify the
+  // engine binary matches the chosen Lambda runtime (design.md §22 risk 6).
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Supported budget periods (Req 9.1). Lowercase values match the API contract
+/// ("weekly" | "monthly" | "yearly").
+enum BudgetPeriod {
+  weekly
+  monthly
+  yearly
+}
+
+/// A registered account holder (Req 1).
+///
+/// `email` preserves the original casing the user registered with, while
+/// `emailCi` is the normalized (lowercased) form used to enforce
+/// case-insensitive uniqueness (Req 1.2). `passwordHash` stores only a salted
+/// hash — never plaintext (Req 1.5).
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String
+  emailCi      String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  categories Category[]
+  expenses   Expense[]
+  budgets    Budget[]
+
+  @@map("users")
+}
+
+/// A user-owned expense category (Req 8).
+///
+/// Case-insensitive per-user uniqueness is enforced by the composite unique
+/// index on (userId, nameCi) (Req 8.1, 8.3). Deleting a User cascades to their
+/// categories (user-owned data). Deletion of a Category that is referenced by
+/// expenses is BLOCKED at the Expense.categoryId relation (onDelete: Restrict),
+/// satisfying Req 8.7.
+model Category {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  name      String
+  nameCi    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expenses Expense[]
+  budgets  Budget[]
+
+  // Per-user case-insensitive name uniqueness (Req 8.1, 8.3).
+  @@unique([userId, nameCi])
+  // Owner-scoped listing performance (Req 8.4).
+  @@index([userId])
+  @@map("categories")
+}
+
+/// A single monetary outflow owned by a user (Req 4-7).
+///
+/// `amount` is Decimal(12,2) covering the max 999,999,999.99 (Req 4.1, 6.1).
+/// `currency` is a 3-letter ISO 4217 code. `date` is stored as a date-only
+/// value; all period/month windows are evaluated in the single configured
+/// PLATFORM_TIMEZONE (A3). `description` is optional and <= 500 chars (enforced
+/// at the DTO layer, Req 4.6; column widened defensively to VarChar(500)).
+model Expense {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  categoryId  String   @db.Uuid
+  amount      Decimal  @db.Decimal(12, 2)
+  currency    String   @db.Char(3)
+  date        DateTime @db.Date
+  description String?  @db.VarChar(500)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Restrict: a Category that is referenced by one or more expenses cannot be
+  // deleted (Req 8.7). The Categories service surfaces this as a conflict.
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  // List ordering + monthly range queries (Req 5.2, 5.3, 11.1).
+  @@index([userId, date])
+  // Category filter + by-category insight (Req 5.4, 11.2).
+  @@index([userId, categoryId])
+  @@map("expenses")
+}
+
+/// A spending limit for a period, optionally scoped to a category (Req 9, 10).
+///
+/// `limitAmount` is Decimal(12,2) (Req 9.1). `categoryId` is nullable: when
+/// present the budget is scoped to that category's expenses (Req 9.2).
+///
+/// DESIGN-OPEN DECISION — Budget.categoryId onDelete: the design mandates
+/// Restrict only for Expense->Category (Req 8.7) and leaves Budget->Category
+/// unspecified. We use SetNull so that deleting a category (which is only
+/// permitted when NO expenses reference it, per Req 8.7/8.8) does not block on
+/// budgets and instead converts an affected budget into an unscoped
+/// (all-categories) budget rather than deleting the user's budget outright.
+/// This avoids conflicting with the Expense Restrict rule and preserves the
+/// user's budget data.
+model Budget {
+  id          String       @id @default(uuid()) @db.Uuid
+  userId      String       @db.Uuid
+  categoryId  String?      @db.Uuid
+  limitAmount Decimal      @db.Decimal(12, 2)
+  period      BudgetPeriod
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  // Owner-scoped budget listing (Req 9.6).
+  @@index([userId])
+  @@map("budgets")
+}
+
+/// Shared login-attempt / lockout state (Req 2.7).
+///
+/// Persisted in PostgreSQL (design ADR-7) so lockout behaves consistently
+/// across stateless Lambda containers. Keyed by the normalized (lowercased)
+/// email so tracking is per-email. `failedCount` accumulates consecutive
+/// failures within the window that started at `windowStart`; `lockedUntil`,
+/// when set and in the future, indicates the email is temporarily locked.
+model LoginAttempt {
+  email       String    @id
+  failedCount Int       @default(0)
+  windowStart DateTime  @default(now())
+  lockedUntil DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@map("login_attempts")
+}

@@ -1,0 +1,130 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Smart Family Expense & Budget API - deploys the NestJS application as an AWS
+  Lambda function behind an API Gateway HTTP API. The same codebase runs locally
+  (RUNTIME_ENV=local) and on AWS (RUNTIME_ENV=aws). Satisfies Requirements 16.3,
+  16.6 and constraints C4, C6.
+
+# ---------------------------------------------------------------------------
+# Parameters: all environment-specific values are supplied at deploy time so
+# that the template stays free of secrets and hard-coded infrastructure ids.
+# ---------------------------------------------------------------------------
+Parameters:
+  DatabaseUrl:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /expense/database-url
+    Description: >
+      Name of the SSM Parameter Store parameter holding the PostgreSQL (RDS)
+      connection string. Resolved at deploy time; the value is injected as the
+      DATABASE_URL Lambda environment variable.
+    NoEcho: true
+
+  JwtSecret:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /expense/jwt-secret
+    Description: >
+      Name of the SSM Parameter Store parameter holding the JWT signing secret.
+      Resolved at deploy time and injected as the JWT_SECRET environment
+      variable. Store the underlying parameter as a SecureString.
+    NoEcho: true
+
+  PlatformTimezone:
+    Type: String
+    Default: UTC
+    Description: >
+      IANA time zone used for all date grouping in analytics (Assumption A3).
+
+  LambdaSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: >
+      Security group attached to the Lambda function. Must allow egress to the
+      RDS security group on the PostgreSQL port.
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >
+      Private subnet ids in which the Lambda function runs so it can reach the
+      RDS instance. Provide at least two subnets in different AZs.
+
+  SsmParameterPath:
+    Type: String
+    Default: /expense
+    Description: >
+      Base path (without trailing slash) under which the application's SSM
+      parameters live. Used to scope the least-privilege ssm:GetParameter grant.
+
+# ---------------------------------------------------------------------------
+# Globals: shared Lambda configuration.
+# ---------------------------------------------------------------------------
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 30
+    MemorySize: 1024
+    Architectures:
+      - x86_64
+
+Resources:
+  # -------------------------------------------------------------------------
+  # HTTP API (API Gateway) fronting the Lambda function.
+  # -------------------------------------------------------------------------
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+
+  # -------------------------------------------------------------------------
+  # The application Lambda: proxies API Gateway events into the NestJS app
+  # via @codegenie/serverless-express (dist/main.handler).
+  # -------------------------------------------------------------------------
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: smart-expense-budget-api
+      CodeUri: ./
+      Handler: dist/main.handler
+      Description: NestJS Smart Family Expense & Budget API (serverless-express proxy).
+      Environment:
+        Variables:
+          RUNTIME_ENV: aws
+          DATABASE_URL: !Ref DatabaseUrl
+          JWT_SECRET: !Ref JwtSecret
+          PLATFORM_TIMEZONE: !Ref PlatformTimezone
+      # Run inside the VPC private subnets so the function can reach RDS.
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroupId
+        SubnetIds: !Ref PrivateSubnetIds
+      # Least-privilege IAM:
+      #   * AWSLambdaVPCAccessExecutionRole - required to create/manage the ENIs
+      #     that let the function run in the VPC.
+      #   * ssm:GetParameter scoped to the application's parameter path only.
+      Policies:
+        - AWSLambdaVPCAccessExecutionRole
+        - Statement:
+            - Sid: ReadAppSsmParameters
+              Effect: Allow
+              Action:
+                - ssm:GetParameter
+                - ssm:GetParameters
+                - ssm:GetParametersByPath
+              Resource:
+                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}
+                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}/*
+      Events:
+        # Catch-all proxy so the single NestJS router handles every route/method.
+        ProxyAny:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /{proxy+}
+            Method: ANY
+
+Outputs:
+  ApiBaseUrl:
+    Description: Base URL of the deployed HTTP API.
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+  ApiFunctionArn:
+    Description: ARN of the application Lambda function.
+    Value: !GetAtt ApiFunction.Arn

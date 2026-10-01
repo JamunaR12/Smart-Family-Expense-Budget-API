@@ -1,0 +1,106 @@
+{
+  "name": "smart-expense-insights-platform",
+  "version": "0.1.0",
+  "description": "Smart Expense Insights Platform - production-quality expense management API (NestJS + Express + Prisma/PostgreSQL), deployable locally and on AWS Lambda.",
+  "author": "",
+  "private": true,
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "nest build",
+    "format": "prettier --write --ignore-unknown \"{src,test}/**/*.ts\"",
+    "format:check": "prettier --check --ignore-unknown \"{src,test}/**/*.ts\"",
+    "start": "nest start",
+    "start:dev": "nest start --watch",
+    "start:debug": "nest start --debug --watch",
+    "start:prod": "node dist/main",
+    "lint": "eslint \"{src,test}/**/*.ts\"",
+    "lint:fix": "eslint \"{src,test}/**/*.ts\" --fix",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:cov": "jest --coverage",
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "audit": "npm audit --omit=dev --audit-level=high",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate:dev": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "db:seed": "ts-node prisma/seed.ts",
+    "sam:prebuild": "npm run prisma:generate && npm run build",
+    "sam:build": "npm run sam:prebuild && sam build",
+    "sam:deploy": "sam deploy",
+    "sam:deploy:guided": "sam deploy --guided",
+    "release:migrate": "prisma migrate deploy",
+    "release": "npm run sam:build && npm run sam:deploy && npm run release:migrate"
+  },
+  "dependencies": {
+    "@codegenie/serverless-express": "4.16.0",
+    "@nestjs/common": "11.1.6",
+    "@nestjs/config": "4.0.2",
+    "@nestjs/core": "11.1.6",
+    "@nestjs/jwt": "11.0.0",
+    "@nestjs/passport": "11.0.5",
+    "@nestjs/platform-express": "11.1.6",
+    "@nestjs/swagger": "11.2.0",
+    "@nestjs/throttler": "6.5.0",
+    "@prisma/client": "6.16.2",
+    "argon2": "0.44.0",
+    "class-transformer": "0.5.1",
+    "class-validator": "0.14.2",
+    "passport": "0.7.0",
+    "passport-jwt": "4.0.1",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2",
+    "zod": "4.1.11"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.37.0",
+    "@nestjs/cli": "11.0.10",
+    "@nestjs/schematics": "11.0.8",
+    "@nestjs/testing": "11.1.6",
+    "@types/jest": "30.0.0",
+    "@types/node": "22.15.3",
+    "@types/passport-jwt": "4.0.1",
+    "@types/supertest": "6.0.3",
+    "cross-env": "10.1.0",
+    "eslint": "9.37.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-prettier": "5.5.4",
+    "fast-check": "4.3.0",
+    "globals": "16.4.0",
+    "jest": "30.2.0",
+    "prettier": "3.6.2",
+    "prisma": "6.16.2",
+    "source-map-support": "0.5.21",
+    "supertest": "7.1.4",
+    "ts-jest": "29.4.4",
+    "ts-loader": "9.5.4",
+    "ts-node": "10.9.2",
+    "tsconfig-paths": "4.2.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.46.0"
+  },
+  "prisma": {
+    "seed": "ts-node prisma/seed.ts"
+  },
+  "jest": {
+    "moduleFileExtensions": [
+      "js",
+      "json",
+      "ts"
+    ],
+    "rootDir": ".",
+    "roots": [
+      "<rootDir>/src",
+      "<rootDir>/test"
+    ],
+    "testRegex": ".*\\.(spec|test)\\.ts$",
+    "transform": {
+      "^.+\\.(t|j)s$": "ts-jest"
+    },
+    "collectCoverageFrom": [
+      "src/**/*.(t|j)s"
+    ],
+    "coverageDirectory": "./coverage",
+    "testEnvironment": "node",
+    "passWithNoTests": true
+  }
+}

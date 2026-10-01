@@ -1,0 +1,111 @@
+name: CI
+
+# Continuous integration for the Smart Expense Insights Platform.
+# Satisfies Req 17.1 (single documented test command), 17.2 (full run summary),
+# and 17.6 (non-zero exit on any test failure — enforced by `set -e` shells and
+# each step failing the job on a non-zero exit code).
+#
+# The test suite runs in its no-DB default mode: DATABASE_TEST_URL is intentionally
+# left unset so the DB-gated property/integration tests self-skip and the pipeline
+# stays green without provisioning a database.
+#
+# The `migrate-deploy` job is a gated, non-interactive release stage (Req 16.6):
+# it runs `prisma migrate deploy` against a shared environment's database. It only
+# runs on pushes to `main` (never on pull requests), only after `build-test`
+# passes, and only when a DATABASE_URL is provisioned for the `production`
+# environment — otherwise it no-ops safely so the pipeline stays green on forks
+# and repositories that have not configured a deployment target.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build, lint and test
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.18.1'
+          cache: 'npm'
+
+      - name: Install dependencies (pinned lockfile)
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint
+
+      # Runs the full suite via the single documented command with coverage.
+      # Jest exits non-zero on any failure and reports each failing test id,
+      # which fails this step and therefore the whole job (Req 17.6).
+      - name: Test (with coverage)
+        run: npm run test:cov
+
+  # Gated, non-interactive migration release stage (Req 16.6).
+  # Applies committed Prisma migrations to a shared environment's database with
+  # `prisma migrate deploy` (forward-only, no prompts). Guardrails:
+  #   * `if: github.event_name == 'push'` — never runs on pull_request events,
+  #     so PRs from forks can't touch a shared database.
+  #   * `needs: build-test` — only runs after the build/lint/test job is green.
+  #   * `environment: production` — scopes the DATABASE_URL secret to the
+  #     protected environment (enables required reviewers / branch protection).
+  #   * The deploy step is skipped when DATABASE_URL is empty, so the job no-ops
+  #     safely on repos that haven't configured a deployment target.
+  migrate-deploy:
+    name: Release — migrate deploy (gated)
+    needs: build-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.18.1'
+          cache: 'npm'
+
+      - name: Install dependencies (pinned lockfile)
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      # No-op safety: if DATABASE_URL isn't configured for this environment, skip
+      # the deploy rather than failing. When it IS set, `prisma migrate deploy`
+      # runs non-interactively and applies only committed migrations, exiting
+      # non-zero (and failing the job) if any migration cannot be applied.
+      - name: Apply migrations (prisma migrate deploy)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "DATABASE_URL is not configured for this environment; skipping migrate deploy."
+            exit 0
+          fi
+          npm run prisma:migrate:deploy

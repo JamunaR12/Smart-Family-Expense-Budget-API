@@ -1,0 +1,40 @@
+# AWS SAM CLI configuration for the Smart Family Expense & Budget API.
+# Values here are sensible defaults for `sam build` / `sam deploy`.
+# Environment-specific and secret values (DATABASE_URL, JWT_SECRET, VPC ids) are
+# supplied via CloudFormation Parameters / SSM Parameter Store, never committed.
+version = 0.1
+
+[default]
+[default.global.parameters]
+stack_name = "smart-expense-budget-api"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.validate.parameters]
+lint = true
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+region = "us-east-1"
+# Parameter values are provided interactively (`sam deploy --guided`) or here.
+# The DatabaseUrl and JwtSecret parameters resolve their values from SSM at
+# deploy time, so only the SSM parameter names / infrastructure ids are set.
+parameter_overrides = [
+  "DatabaseUrl=/expense/database-url",
+  "JwtSecret=/expense/jwt-secret",
+  "PlatformTimezone=UTC",
+  "SsmParameterPath=/expense",
+]
+
+[default.sync.parameters]
+watch = true
+
+[default.local_start_api.parameters]
+warm_containers = "EAGER"
+
+[default.local_start_lambda.parameters]
+warm_containers = "EAGER"
