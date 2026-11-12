@@ -303,13 +303,15 @@ Every user can access only their own data. Isolation is enforced two ways:
 - **Owner-scoped queries** (the primary mechanism): every read and write filters
   by `userId = currentUser.id` (`ownerScope(userId)`), so collections only ever
   contain the caller's records and return `[]` when they own none.
-- **`JwtAuthGuard` + `OwnershipGuard`/`assertOwnership()`**: a global
+- **`JwtAuthGuard` + `assertOwnership()`**: a global
   `JwtAuthGuard` requires a valid token on every route except those marked
   `@Public()` (register, login, docs). For single-resource (`/:id`) routes the
+  services load the row owner-scoped and call `assertOwnership()`, so the
   ownership backstop denies a non-owner **without disclosing whether the
   resource exists** — "not owned" and "not found" both return **404
-  `NOT_FOUND`** (Req 3.2). The HTTP-level resource routes that consume these
-  primitives arrive in Phases 4–6.
+  `NOT_FOUND`** (Req 3.2). (An `OwnershipGuard`/`@RequireOwnership` exists in
+  the codebase but is not applied to any route; the service-level
+  `assertOwnership()` plus owner-scoped queries are what enforce ownership.)
 
 ### Auth error codes
 
@@ -795,10 +797,9 @@ checklist. Each item maps to what is implemented (and the phase that added it).
   internal fields such as `userId` and `passwordHash` are never surfaced.
 - **Secrets are not hardcoded** — `JWT_SECRET` and `DATABASE_URL` are sourced
   from environment configuration (never source). In production they are injected
-  as Lambda environment variables resolved from **SSM Parameter Store / Secrets
-  Manager** (or fetched at cold start); the function is granted a
-  **least-privilege** `ssm:GetParameter` read scoped to the app's parameter path
-  (`/expense/*`), per the design §Configuration / SAM template. Locally they come
+  as Lambda environment variables resolved from **SSM Parameter Store** at
+  deploy time (CloudFormation resolves the values using the deployer's
+  credentials); the function never reads SSM at runtime. Locally they come
   from `.env`.
 - **CORS** — configured via `CORS_ORIGINS` (comma-separated allow-list). The
   **safe default** disables cross-origin access when unset (`origin: false`) — it
@@ -819,8 +820,10 @@ checklist. Each item maps to what is implemented (and the phase that added it).
   bootstrap; there is no divergent application source between environments.
 - **Rate limiting (layered)** — account **lockout** after repeated failed logins
   (Phase 3), a coarse per-container `ThrottlerGuard` (**100 requests / 60s**),
-  and **API Gateway throttling** as the authoritative, shared-state production
-  recommendation (the in-memory throttler is per-warm-container by design).
+  and **API Gateway throttling** (burst 100, sustained 50 requests/second on
+  the `$default` stage, configured in `template.yaml`) as the authoritative,
+  shared-state production layer (the in-memory throttler is per-warm-container
+  by design).
 - **Dependency hygiene** — `npm run audit` (`npm audit --omit=dev
 --audit-level=high`) checks production dependencies. Current known transitive
   advisories: `lodash` (via `@nestjs/config`) and `multer` + `path-to-regexp`
@@ -884,9 +887,10 @@ required). It runs a bounded, parameterless `SELECT 1` against the database:
   internals.
 - **Layered rate-limiting decision.** Account lockout (Phase 3) guards credential
   brute-force; a coarse in-memory `ThrottlerGuard` (100/60s) blunts request
-  floods per warm container; API Gateway throttling is the authoritative,
-  shared-state production layer (the in-memory throttler is per-container by
-  design, which is exactly why the Gateway layer is recommended).
+  floods per warm container; API Gateway throttling (burst 100, sustained 50
+  requests/second on the `$default` stage) is the authoritative, shared-state
+  production layer (the in-memory throttler is per-container by design, which
+  is exactly why the Gateway layer is configured).
 - **Config fail-fast + secret sourcing.** `validateEnv` (Zod) aggregates all
   problems and terminates startup with a single error **naming every offending
   key** (and, for type failures, the expected type). Secrets are sourced from env
@@ -1144,7 +1148,7 @@ npm run test:e2e     # end-to-end config (test/jest-e2e.json) — a subset view
 
 > `npm test` already includes the e2e specs (they are named `*.spec.ts` under
 > `test/e2e/` so the default Jest `testRegex` picks them up); `npm run test:e2e`
-> is a convenience config for running only the `*.e2e-spec.ts` files.
+> is a convenience config for running only the `*.e2e.spec.ts` files.
 
 ### Where each kind of test lives
 
@@ -1280,35 +1284,42 @@ requires the [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-mo
 and configured AWS credentials. `template.yaml` and `samconfig.toml` define the
 stack and deploy parameters.
 
-The ordered release flow (design §Build / package / deploy flow):
+The ordered release flow (design §Build / package / deploy flow). Deploy with
+the script — it performs the post-build steps `sam build` alone cannot:
 
-```bash
+```powershell
 # 1–3. Generate the Prisma client + engine for the Lambda target, compile TS,
-#       and package the function with SAM (bundles the Prisma engine).
-npm run sam:build            # = prisma generate && nest build && sam build
+#       package with SAM, copy the real generated Prisma client into the
+#       build, and trim the package to fit the Lambda size limit.
+.\deploy.ps1
 
-# 4. Provision / update the stack (API Gateway, Lambda, IAM, VPC config).
-npm run sam:deploy           # sam deploy   (use sam:deploy:guided the first time)
-
-# 5. Apply committed migrations to RDS as a release step (DATABASE_URL from env,
+# 4. Apply committed migrations to RDS as a release step (DATABASE_URL from env,
 #    pointed at the RDS instance). Non-interactive and forward-only.
 DATABASE_URL="postgresql://…rds…" npm run release:migrate
 ```
 
-`npm run release` runs steps 1–5 end to end (`sam:build` → `sam:deploy` →
-`release:migrate`). `prisma migrate deploy` here is the same non-interactive,
-forward-only command used by the CI `migrate-deploy` stage above; point
-`DATABASE_URL` at the RDS instance so the released schema matches the deployed
-function.
+`.\deploy.ps1` runs `sam:prebuild` (`prisma generate` + `nest build`), then
+`sam build --no-cached`, then the post-build steps (see [Prisma engine
+bundling](#prisma-engine-bundling)), a package-size check against the Lambda
+262,144,000-byte limit, and `sam deploy` with the parameters from
+`samconfig.toml`. Plain `npm run sam:build` followed by `npm run sam:deploy`
+does **not** perform the post-build copy and trims, so it produces a package
+that either 500s (placeholder Prisma client) or exceeds the size limit.
+`prisma migrate deploy` here is the same non-interactive, forward-only command
+used by the CI `migrate-deploy` stage above; point `DATABASE_URL` at the RDS
+instance so the released schema matches the deployed function.
 
 | Script                   | Runs                                              |
 | ------------------------ | ------------------------------------------------- |
 | `sam:prebuild`           | `prisma generate` + `npm run build`               |
-| `sam:build`              | `sam:prebuild` + `sam build`                      |
+| `sam:build`              | `sam:prebuild` + `sam build --no-cached`          |
 | `sam:deploy`             | `sam deploy`                                       |
 | `sam:deploy:guided`      | `sam deploy --guided` (first-time / reconfigure)  |
 | `release:migrate`        | `prisma migrate deploy` (against RDS via env)     |
 | `release`                | `sam:build` → `sam:deploy` → `release:migrate`    |
+
+> `sam:build`, `sam:deploy`, and `release` do not run the post-build
+> Prisma-client copy or size trims — use `.\deploy.ps1` for deploys.
 
 ### Prerequisites
 
@@ -1337,7 +1348,6 @@ with `sam:deploy:guided`, or via `parameter_overrides` in `samconfig.toml`):
 | `PlatformTimezone`      | `String`                            | IANA time zone used for analytics date grouping. Default `UTC`.                                  |
 | `LambdaSecurityGroupId` | `EC2::SecurityGroup::Id`            | Security group attached to the Lambda; must allow egress to the RDS security group on the Postgres port. |
 | `PrivateSubnetIds`      | `List<EC2::Subnet::Id>`             | Private subnets the Lambda runs in so it can reach RDS. Provide **at least two** subnets in different AZs. |
-| `SsmParameterPath`      | `String`                            | Base path (no trailing slash) under which the app's SSM parameters live; scopes the least-privilege `ssm:GetParameter` grant. Default `/expense`. |
 
 `DatabaseUrl` and `JwtSecret` are `NoEcho` and resolve their **values** from SSM
 at deploy time, so only the parameter **names** and infrastructure ids are ever
@@ -1348,9 +1358,10 @@ written to `samconfig.toml`.
 The function runs inside the VPC via `VpcConfig`, attaching `LambdaSecurityGroupId`
 to the subnets in `PrivateSubnetIds`, so it can reach the RDS instance on its
 private endpoint. The RDS security group should allow inbound PostgreSQL traffic
-**from the Lambda security group** (not from the public internet). Because the
-function runs in private subnets, ensure SSM Parameter Store is reachable at cold
-start via a **NAT gateway** or **VPC interface endpoints** for SSM. Placing the
+**from the Lambda security group** (not from the public internet). The function
+never reads SSM at runtime — the `DatabaseUrl`/`JwtSecret` values are resolved
+by CloudFormation at deploy time and injected as environment variables — so no
+NAT gateway or VPC interface endpoints for SSM are needed. Placing the
 Lambda in at least two AZs (via multiple private subnets) keeps it available if
 one AZ is impaired. Under high concurrency, front RDS with **RDS Proxy** to pool
 connections (design recommendation, see design §Connection management in Lambda).
@@ -1371,10 +1382,11 @@ The function's execution role is granted only:
 
 - **`AWSLambdaVPCAccessExecutionRole`** — the managed policy needed to create and
   manage the elastic network interfaces that let the function run in the VPC.
-- A **least-privilege** inline statement allowing `ssm:GetParameter`,
-  `ssm:GetParameters`, and `ssm:GetParametersByPath` **scoped to
-  `${SsmParameterPath}` and `${SsmParameterPath}/*` only** — so the function can
-  read its own parameters and nothing else in the account.
+
+The SSM parameters are resolved by CloudFormation at deploy time (using the
+deployer's credentials) and injected as Lambda environment variables; the
+function never calls SSM at runtime, so no `ssm:GetParameter` grant is needed
+on the execution role.
 
 ### Prisma engine bundling
 
@@ -1383,11 +1395,22 @@ schema's `binaryTargets` includes both `native` (for local development) and
 **`rhel-openssl-3.0.x`** for the Lambda runtime (Amazon Linux 2023 /
 `nodejs20.x`). Running `prisma generate` before packaging produces the
 `libquery_engine-rhel-openssl-3.0.x.so.node` binary under
-`node_modules/.prisma/client`, which is bundled into the deployment artifact by
-`sam build`. This is why the flow runs **`prisma generate` before `sam build`**;
-if the engine target does not match the chosen runtime, the function fails to
-initialize Prisma at cold start (see design §Prisma engine bundling and §22
-risk 6).
+`node_modules/.prisma/client` — but **`sam build` does not bundle it**. SAM's
+NodejsNpmBuilder packs with `npm pack`, which writes only placeholder stubs
+(2,077-byte `default.js`, `index.js`, etc.) into the build's `.prisma/client`;
+a function deployed from that package fails at cold start with "@prisma/client
+did not initialize yet". The real generated client must be copied into the
+build after `sam build` (`node_modules/.prisma` →
+`.aws-sam/build/ApiFunction/node_modules/.prisma`). Copying it also brings the
+Windows engine binary (`query_engine-windows.dll.node`) and the
+non-PostgreSQL WASM engine files, which push the package over the
+262,144,000-byte Lambda unzipped limit — so the Windows engine and the
+MySQL/CockroachDB/SQL Server/SQLite WASM files in `@prisma/client/runtime`
+must be removed (the PostgreSQL files and the `rhel-openssl-3.0.x` `.so.node`
+stay). `.\deploy.ps1` performs the copy, the trims, and a size check before
+deploying. If the engine target does not match the chosen runtime, the function
+fails to initialize Prisma at cold start (see design §Prisma engine bundling
+and §22 risk 6).
 
 ### RDS migration release step
 
@@ -1396,8 +1419,10 @@ is updated, apply the committed migrations to RDS as an explicit release step
 with `npm run release:migrate` (`prisma migrate deploy`) — the same
 non-interactive, forward-only command used by the CI `migrate-deploy` stage.
 Point `DATABASE_URL` at the RDS instance for this step so the released schema
-matches the deployed function. `npm run release` chains `sam:build` →
-`sam:deploy` → `release:migrate` in that order.
+matches the deployed function. The full release is `.\deploy.ps1` followed by
+`npm run release:migrate` (the `release` npm script chains `sam:build` →
+`sam:deploy` → `release:migrate` but does not run the post-build Prisma-client
+copy or size trims, so it is not a working deploy on its own).
 
 ## Configuration
 
@@ -1600,7 +1625,8 @@ calling out:
   would lower latency if login volume grew.
 - **In-memory throttler vs. gateway throttling.** The per-container
   `ThrottlerGuard` (100/60s) is best-effort per warm container by design; **API
-  Gateway throttling** is the authoritative, shared-state production layer (see
+  Gateway throttling** (burst 100, sustained 50 requests/second, configured in
+  `template.yaml`) is the authoritative, shared-state production layer (see
   [Security](#security)).
 - **HTTP API vs. REST API (ADR-2).** Choosing the HTTP API keeps latency and
   cost down and matches in-app validation, but gives up REST-API features like

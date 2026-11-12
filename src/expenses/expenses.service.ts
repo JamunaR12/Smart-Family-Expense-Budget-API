@@ -227,18 +227,36 @@ export class ExpensesService {
     // mutating anything (Req 6.5, 6.6).
     await this.loadOwned(userId, id);
 
+    // A PATCH with no updatable field (empty body, or a body whose only
+    // values are explicit nulls for the nullable-guarded fields) is a
+    // validation error, not a no-op: Prisma rejects an empty `data` payload,
+    // which would otherwise surface as a 500.
+    const hasUpdatableField =
+      dto.amount != null ||
+      dto.currency != null ||
+      dto.date !== undefined ||
+      dto.description !== undefined ||
+      dto.categoryId != null;
+    if (!hasUpdatableField) {
+      throw new BadRequestException({
+        code: VALIDATION_ERROR_CODE,
+        message: 'At least one field must be provided to update an expense',
+        details: [{ field: 'body', reason: 'no updatable field provided' }],
+      });
+    }
+
     if (dto.date !== undefined) {
       this.assertNotFuture(dto.date);
     }
-    if (dto.categoryId !== undefined) {
+    if (dto.categoryId != null) {
       await this.assertCategoryOwned(userId, dto.categoryId);
     }
 
     const data: Prisma.ExpenseUpdateInput = {};
-    if (dto.amount !== undefined) {
+    if (dto.amount != null) {
       data.amount = new Prisma.Decimal(dto.amount);
     }
-    if (dto.currency !== undefined) {
+    if (dto.currency != null) {
       data.currency = dto.currency.toUpperCase();
     }
     if (dto.date !== undefined) {
@@ -247,7 +265,7 @@ export class ExpensesService {
     if (dto.description !== undefined) {
       data.description = dto.description;
     }
-    if (dto.categoryId !== undefined) {
+    if (dto.categoryId != null) {
       data.category = { connect: { id: dto.categoryId } };
     }
 

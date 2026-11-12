@@ -29,6 +29,17 @@ export interface PublicUser {
 }
 
 /**
+ * Fixed argon2id hash used only to equalize login timing. When the email does
+ * not exist, the supplied password is verified against this dummy hash (which
+ * never matches a real password) so a failed login costs the same as a real
+ * argon2 verification — otherwise response time alone would reveal whether an
+ * email is registered. It authenticates nobody; it exists only so both login
+ * paths run the same KDF.
+ */
+const DUMMY_PASSWORD_HASH =
+  '$argon2id$v=19$m=65536,t=3,p=4$yIeLlDJVmY+ivmNhJaPMEw$znrP4KTUjr/E85iDV0c8WwPqxVXVY+eKdpqKG4fXkbk';
+
+/**
  * Authentication business logic (Req 1, 2).
  *
  * Orchestrates registration (hash + case-insensitive uniqueness) and login
@@ -109,9 +120,13 @@ export class AuthService {
     await this.lockout.assertNotLocked(emailCi);
 
     const user = await this.users.findByEmailCi(emailCi);
-    const passwordValid = user
-      ? await this.hasher.verify(user.passwordHash, dto.password)
-      : false;
+    // Always run an argon2 verification — against the dummy hash when the
+    // user does not exist — so a wrong email costs the same time as a wrong
+    // password and timing cannot reveal whether the email is registered.
+    const passwordValid = await this.hasher.verify(
+      user ? user.passwordHash : DUMMY_PASSWORD_HASH,
+      dto.password,
+    );
 
     if (!user || !passwordValid) {
       // Record the failure (which may trip the lock) then reject generically.

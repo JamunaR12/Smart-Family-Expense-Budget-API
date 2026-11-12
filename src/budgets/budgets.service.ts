@@ -118,18 +118,32 @@ export class BudgetsService {
   ): Promise<BudgetResponse> {
     await this.loadOwned(userId, id);
 
-    if (dto.categoryId !== undefined) {
+    // A PATCH with no updatable field (empty body, or a body whose only
+    // values are explicit nulls) is a validation error, not a no-op: Prisma
+    // rejects an empty `data` payload, which would otherwise surface as
+    // a 500.
+    const hasUpdatableField =
+      dto.limitAmount != null || dto.period != null || dto.categoryId != null;
+    if (!hasUpdatableField) {
+      throw new BadRequestException({
+        code: VALIDATION_ERROR_CODE,
+        message: 'At least one field must be provided to update a budget',
+        details: [{ field: 'body', reason: 'no updatable field provided' }],
+      });
+    }
+
+    if (dto.categoryId != null) {
       await this.assertCategoryOwned(userId, dto.categoryId);
     }
 
     const data: Prisma.BudgetUpdateInput = {};
-    if (dto.limitAmount !== undefined) {
+    if (dto.limitAmount != null) {
       data.limitAmount = new Prisma.Decimal(dto.limitAmount);
     }
-    if (dto.period !== undefined) {
+    if (dto.period != null) {
       data.period = dto.period;
     }
-    if (dto.categoryId !== undefined) {
+    if (dto.categoryId != null) {
       data.category = { connect: { id: dto.categoryId } };
     }
 

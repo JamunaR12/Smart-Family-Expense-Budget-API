@@ -19,7 +19,7 @@ lint = true
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
 resolve_s3 = true
-region = "us-east-1"
+region = "us-east-2"
 # Parameter values are provided interactively (`sam deploy --guided`) or here.
 # The DatabaseUrl and JwtSecret parameters resolve their values from SSM at
 # deploy time, so only the SSM parameter names / infrastructure ids are set.
@@ -27,7 +27,8 @@ parameter_overrides = [
   "DatabaseUrl=/expense/database-url",
   "JwtSecret=/expense/jwt-secret",
   "PlatformTimezone=UTC",
-  "SsmParameterPath=/expense",
+  "LambdaSecurityGroupId=sg-097b84b98107dc684",
+  "PrivateSubnetIds=subnet-07c99c2e61d3a861a,subnet-029669b4442a9c0e9",
 ]
 
 [default.sync.parameters]

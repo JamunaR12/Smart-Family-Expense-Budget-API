@@ -47,13 +47,6 @@ Parameters:
       Private subnet ids in which the Lambda function runs so it can reach the
       RDS instance. Provide at least two subnets in different AZs.
 
-  SsmParameterPath:
-    Type: String
-    Default: /expense
-    Description: >
-      Base path (without trailing slash) under which the application's SSM
-      parameters live. Used to scope the least-privilege ssm:GetParameter grant.
-
 # ---------------------------------------------------------------------------
 # Globals: shared Lambda configuration.
 # ---------------------------------------------------------------------------
@@ -73,6 +66,12 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: $default
+      # Authoritative, shared-state throttling for the API (the in-app
+      # ThrottlerGuard is per warm container only). Burst 100 / sustained
+      # 50 requests per second across the whole API.
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 100
+        ThrottlingRateLimit: 50
 
   # -------------------------------------------------------------------------
   # The application Lambda: proxies API Gateway events into the NestJS app
@@ -97,22 +96,13 @@ Resources:
         SecurityGroupIds:
           - !Ref LambdaSecurityGroupId
         SubnetIds: !Ref PrivateSubnetIds
-      # Least-privilege IAM:
-      #   * AWSLambdaVPCAccessExecutionRole - required to create/manage the ENIs
-      #     that let the function run in the VPC.
-      #   * ssm:GetParameter scoped to the application's parameter path only.
+      # Least-privilege IAM: AWSLambdaVPCAccessExecutionRole is required to
+      # create/manage the ENIs that let the function run in the VPC. The
+      # function never reads SSM at runtime — DatabaseUrl/JwtSecret are
+      # resolved by CloudFormation at deploy time and injected as env vars —
+      # so no ssm:GetParameter grant is needed on the execution role.
       Policies:
         - AWSLambdaVPCAccessExecutionRole
-        - Statement:
-            - Sid: ReadAppSsmParameters
-              Effect: Allow
-              Action:
-                - ssm:GetParameter
-                - ssm:GetParameters
-                - ssm:GetParametersByPath
-              Resource:
-                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}
-                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}/*
       Events:
         # Catch-all proxy so the single NestJS router handles every route/method.
         ProxyAny:
