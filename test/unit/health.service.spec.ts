@@ -23,9 +23,7 @@ import {
  */
 describe('HealthService (Req 13.2, 16.4)', () => {
   /** Builds a HealthService with a stubbed `$queryRaw` on a fake PrismaService. */
-  function makeService(
-    queryRaw: () => Promise<unknown>,
-  ): HealthService {
+  function makeService(queryRaw: () => Promise<unknown>): HealthService {
     const prisma = { $queryRaw: jest.fn(queryRaw) } as unknown as PrismaService;
     return new HealthService(prisma);
   }
