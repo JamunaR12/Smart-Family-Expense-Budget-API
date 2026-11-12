@@ -91,6 +91,7 @@ Resources:
           DATABASE_URL: !Ref DatabaseUrl
           JWT_SECRET: !Ref JwtSecret
           PLATFORM_TIMEZONE: !Ref PlatformTimezone
+          PORT: '3000'
       # Run inside the VPC private subnets so the function can reach RDS.
       VpcConfig:
         SecurityGroupIds:
@@ -128,3 +129,4 @@ Outputs:
   ApiFunctionArn:
     Description: ARN of the application Lambda function.
     Value: !GetAtt ApiFunction.Arn
+

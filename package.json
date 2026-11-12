@@ -102,5 +102,15 @@
     "coverageDirectory": "./coverage",
     "testEnvironment": "node",
     "passWithNoTests": true
-  }
+  },
+  "allowScripts": {
+    "@prisma/client@6.16.2": true,
+    "@prisma/engines@6.16.2": true,
+    "prisma@6.16.2": true,
+    "argon2@0.44.0": true
+  },
+  "files": [
+    "dist",
+    "prisma"
+  ]
 }
